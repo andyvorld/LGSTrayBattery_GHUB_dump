@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -14,6 +15,19 @@ namespace LGSTrayBattery_GHUB_dump
 {
     class Program
     {
+        private static readonly Dictionary<string, string> DeviceIdDictionary = new Dictionary<string, string>();
+
+        private struct Device
+        {
+            public string pid;
+            public string deviceId;
+            public string fullName;
+        }
+
+        private static bool deviceFound = false;
+        private static int extractCount = 0;
+        private static int deviceCount = -1;
+
         static void  Main(string[] args)
         {
             var url = new Uri("ws://localhost:9010");
@@ -49,7 +63,7 @@ namespace LGSTrayBattery_GHUB_dump
                 }
 
                 Console.WriteLine("LGHUB_agent connected.");
-                Console.WriteLine("Press any key to quit, after power models are extracted.");
+                Console.WriteLine("");
 
                 ws.Send(JsonConvert.SerializeObject(new
                 {
@@ -58,11 +72,17 @@ namespace LGSTrayBattery_GHUB_dump
                     path = "/devices"
                 }));
 
+                while (!(deviceFound && extractCount < deviceCount))
+                {
+                }
+
+                Thread.Sleep(500);
+
+                Console.WriteLine("");
+                Console.WriteLine("Found all .xml files");
+                Console.WriteLine("Press any key to quit.");
                 Console.ReadKey();
             }
-
-            Console.WriteLine("End");
-            Console.ReadKey();
         }
 
         private static void MessageParse(WebsocketClient ws, ResponseMessage reply)
@@ -74,10 +94,14 @@ namespace LGSTrayBattery_GHUB_dump
                 Console.WriteLine($"Found {replyJObject["payload"]["devices"].Count()} devices");
                 Console.WriteLine("---");
 
+                List<Device> devices = new List<Device>();
+
                 foreach (var deviceJObject in replyJObject["payload"]["devices"])
                 {
                     bool isWireless = false;
                     string pid = "";
+
+                    DeviceIdDictionary.Add(deviceJObject["id"].ToString(), deviceJObject["extendedDisplayName"].ToString());
 
                     foreach (var mode in deviceJObject["virtualDevice"]["modes"])
                     {
@@ -90,18 +114,39 @@ namespace LGSTrayBattery_GHUB_dump
 
                     if (isWireless)
                     {
-                        ws.Send(JsonConvert.SerializeObject(new
+                        devices.Add(new Device()
                         {
-                            msgId = $"FEATURES_{pid}",
-                            verb = "GET",
-                            path = $"/devices/{deviceJObject["id"]}/resources_available"
-                        }));
+                            pid = pid,
+                            deviceId = deviceJObject["id"].ToString(),
+                            fullName = deviceJObject["extendedDisplayName"].ToString()
+                        });
                     }
 
                     Console.WriteLine(deviceJObject["extendedDisplayName"]);
-                    Console.WriteLine($"Device is wireless: {isWireless}, PID: {pid}");
+                    if (isWireless)
+                    {
+                        Console.WriteLine($"Device is wireless, PID: {pid}");
+
+                    }
+                    else
+                    {
+                        Console.WriteLine("Device is not wireless, skipping");
+                    }
                     Console.WriteLine("");
                 }
+
+                foreach (var device in devices)
+                {
+                    ws.Send(JsonConvert.SerializeObject(new
+                    {
+                        msgId = $"FEATURES_{device.pid}",
+                        verb = "GET",
+                        path = $"/devices/{device.deviceId}/resources_available"
+                    }));
+                }
+
+                deviceFound = true;
+                deviceCount = devices.Count;
             }
             else if (replyJObject["msgId"].ToString().StartsWith("FEATURES_"))
             {
@@ -136,7 +181,8 @@ namespace LGSTrayBattery_GHUB_dump
                 var cli = new WebClient();
                 cli.DownloadFile(replyJObject["payload"]["url"].ToString(), $"./46D_{pid}.xml");
 
-                Console.WriteLine($"Extracted power model for device {pid}");
+                Console.WriteLine($"Extracted power model for [{DeviceIdDictionary[deviceId]}]: 46D_{pid}.xml");
+                extractCount++;
             }
             else
             {
