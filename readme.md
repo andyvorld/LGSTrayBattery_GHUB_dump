@@ -12,5 +12,8 @@ Logitech G HUB is not needed after extraction of `.xml` files.
 4. Wait for the extraction to complete and press any key
 5. Copy all `.xml` files to the `power model` subfolder of LGS Tray Battery
 
+## Known issues
+ - The extracted `.xml` file may have illegal characters within its comments, you may need to double check the validity of the file with another tool like vscode. (Refer to, https://github.com/andyvorld/LGSTrayBattery/issues/11)
+
 ## Tested Devices
  - G403
