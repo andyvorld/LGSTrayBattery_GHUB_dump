@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.WebSockets;
@@ -22,6 +23,13 @@ namespace LGSTrayBattery_GHUB_dump
             public string pid;
             public string deviceId;
             public string fullName;
+            public string deviceModel;
+        }
+
+        private struct DeviceResource
+        {
+            public string key;
+            public string url;
         }
 
         private static bool deviceFound = false;
@@ -69,7 +77,7 @@ namespace LGSTrayBattery_GHUB_dump
                 {
                     msgId = "",
                     verb = "GET",
-                    path = "/devices"
+                    path = "/devices/list"
                 }));
 
                 while (!(deviceFound && extractCount < deviceCount))
@@ -89,27 +97,25 @@ namespace LGSTrayBattery_GHUB_dump
         {
             var replyJObject = JObject.Parse(reply.Text);
 
-            if (replyJObject["path"].ToString() == "/devices")
+            if (replyJObject["path"].ToString() == "/devices/list")
             {
-                Console.WriteLine($"Found {replyJObject["payload"]["devices"].Count()} devices");
+                Console.WriteLine($"Found {replyJObject["payload"]["deviceInfos"].Count()} devices");
                 Console.WriteLine("---");
 
                 List<Device> devices = new List<Device>();
 
-                foreach (var deviceJObject in replyJObject["payload"]["devices"])
+                foreach (var deviceJObject in replyJObject["payload"]["deviceInfos"])
                 {
+                    Console.WriteLine(deviceJObject.ToString());
                     bool isWireless = false;
                     string pid = "";
 
                     DeviceIdDictionary.Add(deviceJObject["id"].ToString(), deviceJObject["extendedDisplayName"].ToString());
 
-                    foreach (var mode in deviceJObject["virtualDevice"]["modes"])
+                    if (deviceJObject["capabilities"]["hasBatteryStatus"].ToObject<Boolean>() == true)
                     {
-                        if (mode["wireless"].ToObject<bool>())
-                        {
-                            isWireless = true;
-                            pid = mode["interfaces"].First["pid"].ToString().ToUpperInvariant();
-                        }
+                        isWireless = true;
+                        pid = deviceJObject["pid"].ToString();
                     }
 
                     if (isWireless)
@@ -118,7 +124,8 @@ namespace LGSTrayBattery_GHUB_dump
                         {
                             pid = pid,
                             deviceId = deviceJObject["id"].ToString(),
-                            fullName = deviceJObject["extendedDisplayName"].ToString()
+                            fullName = deviceJObject["extendedDisplayName"].ToString(),
+                            deviceModel = deviceJObject["deviceModel"].ToString()
                         });
                     }
 
@@ -139,9 +146,13 @@ namespace LGSTrayBattery_GHUB_dump
                 {
                     ws.Send(JsonConvert.SerializeObject(new
                     {
-                        msgId = $"FEATURES_{device.pid}",
+                        msgId = $"FEATURES_{device.deviceId}_{device.pid}",
                         verb = "GET",
-                        path = $"/devices/{device.deviceId}/resources_available"
+                        path = $"/devices/resources",
+                        payload = new {
+                            device.deviceModel,
+                            id = device.deviceId
+                        }
                     }));
                 }
 
@@ -150,44 +161,36 @@ namespace LGSTrayBattery_GHUB_dump
             }
             else if (replyJObject["msgId"].ToString().StartsWith("FEATURES_"))
             {
-                var deviceId = replyJObject["path"].ToString().Split('/')[2];
+                var deviceId = replyJObject["msgId"].ToString().Split('_')[1];
                 var pid = replyJObject["msgId"].ToString().Split('_').Last();
 
-                bool hasBattery = replyJObject["payload"]["keys"].ToObject<List<string>>().Contains("battery");
+                List<DeviceResource> deviceResources = replyJObject["payload"]["resources"].ToObject<List<DeviceResource>>();
 
-                if (hasBattery)
+                DeviceResource batteryResource = deviceResources.Where(resource => resource.key == "battery").First();
+                if (batteryResource.url != null)
                 {
-                    ws.Send(JsonConvert.SerializeObject(new
-                    {
-                        msgId = $"BATTERY_{pid}",
-                        verb = "GET",
-                        path = $"/devices/{deviceId}/resource",
-                        payload = new
-                        {
-                            key = "battery"
-                        }
-                    }));
-                }
-                else
-                {
-                    Console.WriteLine($"[ERROR] Device ${pid}, does not have a battery api");
-                }
-            }
-            else if (replyJObject["msgId"].ToString().StartsWith("BATTERY_"))
-            {
-                var deviceId = replyJObject["path"].ToString().Split('/')[2];
-                var pid = replyJObject["msgId"].ToString().Split('_').Last();
+                    UInt16.TryParse(pid, out ushort pidInt);
+                    WebClient cli = new WebClient();
+                    var fileName = $"./46D_{pidInt:X4}.xml";
 
-                var cli = new WebClient();
-                cli.DownloadFile(replyJObject["payload"]["url"].ToString(), $"./46D_{pid}.xml");
+                    cli.DownloadFile(batteryResource.url, fileName);
+                    FixXMLContent(fileName);
 
-                Console.WriteLine($"Extracted power model for [{DeviceIdDictionary[deviceId]}]: 46D_{pid}.xml");
-                extractCount++;
+                    Console.WriteLine($"Extracted power model for [{DeviceIdDictionary[deviceId]}]: 46D_{pidInt:X4}.xml");
+                    extractCount++;
+                }
             }
             else
             {
-                //Console.WriteLine(reply);
+                // Console.WriteLine(reply);
             }
+        }
+
+        private static void FixXMLContent (string fileName)
+        {
+            string text = File.ReadAllText(fileName);
+            text = text.Replace(" -- ", " - ");
+            File.WriteAllText(fileName, text);
         }
     }
 }
