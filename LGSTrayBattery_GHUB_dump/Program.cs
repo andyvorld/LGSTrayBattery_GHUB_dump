@@ -1,12 +1,16 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Websocket.Client;
@@ -15,22 +19,14 @@ namespace LGSTrayBattery_GHUB_dump
 {
     class Program
     {
-        private static readonly Dictionary<string, string> DeviceIdDictionary = new Dictionary<string, string>();
-
-        private struct Device
-        {
-            public string pid;
-            public string deviceId;
-            public string fullName;
-        }
-
-        private static bool deviceFound = false;
-        private static int extractCount = 0;
-        private static int deviceCount = -1;
+        private const string OUTPUT_FOLDER = "./PowerModel";
+        private static DateTime startTime;
 
         static void  Main(string[] args)
         {
             var url = new Uri("ws://localhost:9010");
+
+            Directory.CreateDirectory(OUTPUT_FOLDER);
 
             var factory = new Func<ClientWebSocket>(() =>
             {
@@ -69,14 +65,15 @@ namespace LGSTrayBattery_GHUB_dump
                 {
                     msgId = "",
                     verb = "GET",
-                    path = "/devices"
+                    path = "/updates/info"
                 }));
 
-                while (!(deviceFound && extractCount < deviceCount))
-                {
-                }
+                startTime = DateTime.Now;
 
-                Thread.Sleep(500);
+                while ((DateTime.Now - startTime).Milliseconds < 500)
+                {
+                    Thread.Sleep(100);
+                }
 
                 Console.WriteLine("");
                 Console.WriteLine("Found all .xml files");
@@ -88,105 +85,49 @@ namespace LGSTrayBattery_GHUB_dump
         private static void MessageParse(WebsocketClient ws, ResponseMessage reply)
         {
             var replyJObject = JObject.Parse(reply.Text);
+            Debug.WriteLine(reply);
 
-            if (replyJObject["path"].ToString() == "/devices")
+            if (replyJObject["path"].ToString() == "/updates/info")
             {
-                Console.WriteLine($"Found {replyJObject["payload"]["devices"].Count()} devices");
-                Console.WriteLine("---");
-
-                List<Device> devices = new List<Device>();
-
-                foreach (var deviceJObject in replyJObject["payload"]["devices"])
+                foreach (var depot in replyJObject["payload"]["depots"])
                 {
-                    bool isWireless = false;
-                    string pid = "";
-
-                    DeviceIdDictionary.Add(deviceJObject["id"].ToString(), deviceJObject["extendedDisplayName"].ToString());
-
-                    foreach (var mode in deviceJObject["virtualDevice"]["modes"])
+                    List<string> xmlFiles = depot["files"].Where(x => ((string) x).EndsWith(".xml")).Select(x => (string) x).ToList();
+                    if (xmlFiles.Count == 0)
                     {
-                        if (mode["wireless"].ToObject<bool>())
+                        continue;
+                    }
+
+                    Console.WriteLine($"Found device: {depot["name"]}");
+
+                    XmlDocument xmlDoc = new XmlDocument();
+
+                    foreach (string xmlFile in xmlFiles)
+                    {
+                        try
                         {
-                            isWireless = true;
-                            pid = mode["interfaces"].First["pid"].ToString().ToUpperInvariant();
+                            xmlDoc.Load(Path.Combine((string) depot["localFolder"], xmlFile));
+                            var root = xmlDoc.SelectSingleNode("powermodel");
+
+                            if (root == null)
+                            {
+                                throw new XmlException("powermodel not found");
+                            }
+
+                            int VID = int.Parse(root.Attributes["vid"].Value.Replace("0x", ""), NumberStyles.HexNumber);
+                            int PID = int.Parse(root.Attributes["pid"].Value.Replace("0x", ""), NumberStyles.HexNumber);
+
+                            string powerModelName = $"{VID:X3}_{PID:X3}.xml";
+
+                            File.Copy(Path.Combine((string) depot["localFolder"], xmlFile), Path.Combine(OUTPUT_FOLDER, powerModelName), true);
+
+                            startTime = DateTime.Now;
+                        }
+                        catch (XmlException)
+                        {
+                            Console.WriteLine($"{xmlFile} is not a valid xml batter model, skipping...");
                         }
                     }
-
-                    if (isWireless)
-                    {
-                        devices.Add(new Device()
-                        {
-                            pid = pid,
-                            deviceId = deviceJObject["id"].ToString(),
-                            fullName = deviceJObject["extendedDisplayName"].ToString()
-                        });
-                    }
-
-                    Console.WriteLine(deviceJObject["extendedDisplayName"]);
-                    if (isWireless)
-                    {
-                        Console.WriteLine($"Device is wireless, PID: {pid}");
-
-                    }
-                    else
-                    {
-                        Console.WriteLine("Device is not wireless, skipping");
-                    }
-                    Console.WriteLine("");
                 }
-
-                foreach (var device in devices)
-                {
-                    ws.Send(JsonConvert.SerializeObject(new
-                    {
-                        msgId = $"FEATURES_{device.pid}",
-                        verb = "GET",
-                        path = $"/devices/{device.deviceId}/resources_available"
-                    }));
-                }
-
-                deviceFound = true;
-                deviceCount = devices.Count;
-            }
-            else if (replyJObject["msgId"].ToString().StartsWith("FEATURES_"))
-            {
-                var deviceId = replyJObject["path"].ToString().Split('/')[2];
-                var pid = replyJObject["msgId"].ToString().Split('_').Last();
-
-                bool hasBattery = replyJObject["payload"]["keys"].ToObject<List<string>>().Contains("battery");
-
-                if (hasBattery)
-                {
-                    ws.Send(JsonConvert.SerializeObject(new
-                    {
-                        msgId = $"BATTERY_{pid}",
-                        verb = "GET",
-                        path = $"/devices/{deviceId}/resource",
-                        payload = new
-                        {
-                            key = "battery"
-                        }
-                    }));
-                }
-                else
-                {
-                    Console.WriteLine($"[ERROR] Device ${pid}, does not have a battery api");
-                }
-            }
-            else if (replyJObject["msgId"].ToString().StartsWith("BATTERY_"))
-            {
-                var deviceId = replyJObject["path"].ToString().Split('/')[2];
-                var pid = replyJObject["msgId"].ToString().Split('_').Last();
-
-                var cli = new WebClient();
-                cli.DownloadFile(replyJObject["payload"]["url"].ToString(), $"./46D_{pid}.xml");
-
-                Console.WriteLine($"Extracted power model for [{DeviceIdDictionary[deviceId]}]: 46D_{pid}.xml");
-                extractCount++;
-            }
-            else
-            {
-                //Console.WriteLine(reply);
             }
         }
     }
